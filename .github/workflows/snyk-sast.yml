@@ -1,4 +1,5 @@
 #SAST scanning with Snyk
+#######
 name: SAST-Snyk Vulnerability Scanning
 
 on:
