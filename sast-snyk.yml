@@ -1,0 +1,29 @@
+#SAST-SNYK CI/CD Pipeline
+name: SAST-Snyk Vulnerability Scanning
+on:
+    push:
+        branches:
+            main
+    pull_request:
+
+jobs:
+    sast-snyk:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Run Snyk to check for vulnerabilities
+              uses: actions/checkout@master
+              
+            - name: Run Snyk Code Scan
+              uses: snyk/actions/python@master
+              env:
+                SNYK_TOKEN: ${{secrets.SNYK_TOKEN}}
+              with:
+                args: >
+                  code test
+                  --sarif-file-output=snyk.sarif
+            - name: Upload result to GitHub Code Scanning
+              uses: github/codeql-action/upload-sarif@v3
+              with: 
+                sarif_file: snyk.sarif
+####
