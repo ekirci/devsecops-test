@@ -199,3 +199,270 @@ jobs:
         run: |
           echo "End of Trivy image job"
           ls -lah *.sarif 2>/dev/null || true
+
+  report:
+    name: Report - PDF/CSV Summary (SARIF -> Report)
+    runs-on: ubuntu-latest
+    needs: [secrets_gitleaks, trivy_config, trivy_fs, trivy_image]
+    timeout-minutes: 10
+    steps:
+      - name: Download SARIF artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect SARIF files
+        run: |
+          mkdir -p sarif
+          find artifacts -type f -name "*.sarif" -print -exec cp {} sarif/ \;
+          echo "Collected SARIF files:"
+          ls -lah sarif || true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install report dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas matplotlib reportlab
+
+      - name: Generate PDF/CSV report (with charts)
+        run: |
+          cat > sarif_to_pdf.py <<'PY'
+          import json, os, glob
+          from datetime import datetime
+          import pandas as pd
+          import matplotlib.pyplot as plt
+          from reportlab.lib.pagesizes import A4
+          from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+          from reportlab.lib import colors
+          from reportlab.lib.styles import getSampleStyleSheet
+
+          def _get(obj, path, default=""):
+              cur = obj
+              for p in path:
+                  if isinstance(cur, dict) and p in cur:
+                      cur = cur[p]
+                  else:
+                      return default
+              return cur
+
+          def parse_sarif(path):
+              with open(path, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+              rows = []
+              for run in (data.get("runs") or []):
+                  tool = _get(run, ["tool", "driver", "name"], os.path.basename(path))
+                  for r in (run.get("results") or []):
+                      rule_id = r.get("ruleId", "")
+                      level = r.get("level", "")
+                      msg = _get(r, ["message", "text"], "").replace("\n", " ").strip()
+
+                      loc0 = (r.get("locations") or [{}])[0]
+                      ploc = loc0.get("physicalLocation") or {}
+                      uri = _get(ploc, ["artifactLocation", "uri"], "")
+                      region = ploc.get("region") or {}
+                      line = region.get("startLine", "")
+
+                      props = r.get("properties") or {}
+                      sev = props.get("severity") or props.get("security-severity") or ""
+
+                      rows.append({
+                          "source_sarif": os.path.basename(path),
+                          "tool": tool,
+                          "ruleId": rule_id,
+                          "level": level,
+                          "severity": str(sev),
+                          "message": msg,
+                          "file": uri,
+                          "line": line,
+                      })
+              return pd.DataFrame(rows)
+
+          def sev_bucket(row):
+              s = (row.get("severity") or "").strip()
+              if s and s.lower() != "none":
+                  return s
+              lv = (row.get("level") or "").lower()
+              if lv == "error": return "HIGH"
+              if lv == "warning": return "MEDIUM"
+              if lv == "note": return "LOW"
+              return "UNKNOWN"
+
+          def make_charts(df, out_dir):
+              charts = []
+              if df.empty:
+                  return charts
+
+              df2 = df.copy()
+              df2["sev_bucket"] = df2.apply(sev_bucket, axis=1)
+
+              # Severity distribution
+              plt.figure()
+              df2["sev_bucket"].value_counts().plot(kind="bar")
+              plt.title("Severity distribution (best-effort)")
+              plt.xlabel("Severity")
+              plt.ylabel("Count")
+              p1 = os.path.join(out_dir, "severity_distribution.png")
+              plt.tight_layout()
+              plt.savefig(p1, dpi=200)
+              plt.close()
+              charts.append(p1)
+
+              # Top rules
+              plt.figure()
+              df2["ruleId"].value_counts().head(10).plot(kind="bar")
+              plt.title("Top rules (Top 10)")
+              plt.xlabel("Rule")
+              plt.ylabel("Count")
+              p2 = os.path.join(out_dir, "top_rules.png")
+              plt.tight_layout()
+              plt.savefig(p2, dpi=200)
+              plt.close()
+              charts.append(p2)
+
+              # Findings by tool (pie)
+              plt.figure()
+              df2["tool"].value_counts().plot(kind="pie", autopct="%1.0f%%")
+              plt.title("Findings by tool")
+              plt.ylabel("")
+              p3 = os.path.join(out_dir, "findings_by_tool.png")
+              plt.tight_layout()
+              plt.savefig(p3, dpi=200)
+              plt.close()
+              charts.append(p3)
+
+              # Top files
+              plt.figure()
+              df2["file"].value_counts().head(10).plot(kind="bar")
+              plt.title("Top affected files (Top 10)")
+              plt.xlabel("File")
+              plt.ylabel("Count")
+              p4 = os.path.join(out_dir, "top_files.png")
+              plt.tight_layout()
+              plt.savefig(p4, dpi=200)
+              plt.close()
+              charts.append(p4)
+
+              return charts
+
+          def df_to_table_data(df, max_rows=60):
+              cols = ["tool", "ruleId", "level", "severity", "file", "line", "message"]
+              df = df.copy()
+              for c in cols:
+                  if c not in df.columns:
+                      df[c] = ""
+              df = df[cols].head(max_rows)
+
+              data = [cols]
+              for _, row in df.iterrows():
+                  msg = str(row["message"])
+                  if len(msg) > 120: msg = msg[:117] + "..."
+                  fp = str(row["file"])
+                  if len(fp) > 55: fp = "..." + fp[-52:]
+                  data.append([
+                      str(row["tool"]),
+                      str(row["ruleId"]),
+                      str(row["level"]),
+                      str(row["severity"]),
+                      fp,
+                      str(row["line"]),
+                      msg
+                  ])
+              return data
+
+          def build_pdf(df_all, pdf_path, charts):
+              styles = getSampleStyleSheet()
+              doc = SimpleDocTemplate(pdf_path, pagesize=A4, title="Security Findings Report")
+              story = []
+              story.append(Paragraph("Security Findings Report", styles["Title"]))
+              story.append(Spacer(1, 8))
+              story.append(Paragraph(f"Generated: {datetime.utcnow().isoformat()}Z", styles["Normal"]))
+              story.append(Spacer(1, 12))
+
+              if df_all.empty:
+                  story.append(Paragraph("No findings found in provided SARIF files.", styles["Normal"]))
+                  doc.build(story)
+                  return
+
+              story.append(Paragraph(f"Total findings: <b>{len(df_all)}</b>", styles["Normal"]))
+              story.append(Spacer(1, 10))
+
+              for ch in charts:
+                  if os.path.exists(ch):
+                      story.append(Image(ch, width=520, height=280))
+                      story.append(Spacer(1, 10))
+
+              story.append(PageBreak())
+
+              for sarif_name, df_s in df_all.groupby("source_sarif"):
+                  story.append(Paragraph(f"Findings from: <b>{sarif_name}</b> (count: {len(df_s)})", styles["Heading2"]))
+                  story.append(Spacer(1, 6))
+                  data = df_to_table_data(df_s, max_rows=60)
+                  tbl = Table(data, repeatRows=1, colWidths=[70, 85, 45, 55, 140, 35, 120])
+                  tbl.setStyle(TableStyle([
+                      ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+                      ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+                      ("FONTSIZE", (0,0), (-1,-1), 7),
+                      ("VALIGN", (0,0), (-1,-1), "TOP"),
+                      ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.white]),
+                  ]))
+                  story.append(tbl)
+                  story.append(Spacer(1, 10))
+                  story.append(Paragraph("Note: table is truncated to first 60 rows for readability.", styles["Italic"]))
+                  story.append(PageBreak())
+
+              doc.build(story)
+
+          def main():
+              os.makedirs("reports", exist_ok=True)
+              sarifs = sorted(glob.glob("sarif/*.sarif"))
+              dfs = []
+              for s in sarifs:
+                  try:
+                      df = parse_sarif(s)
+                      if not df.empty:
+                          dfs.append(df)
+                  except Exception as e:
+                      print(f"[WARN] Failed to parse {s}: {e}")
+
+              df_all = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+              csv_path = os.path.join("reports", "findings.csv")
+              df_all.to_csv(csv_path, index=False)
+
+              charts = make_charts(df_all, "reports")
+              pdf_path = os.path.join("reports", "security-report.pdf")
+              build_pdf(df_all, pdf_path, charts)
+
+              summary = []
+              summary.append("# Security Report Summary")
+              summary.append(f"- SARIF files: **{len(sarifs)}**")
+              summary.append(f"- Findings: **{len(df_all)}**")
+              if not df_all.empty:
+                  summary.append("")
+                  summary.append("## Findings by tool")
+                  counts = df_all["tool"].value_counts().to_dict()
+                  for k, v in counts.items():
+                      summary.append(f"- {k}: **{v}**")
+              open("reports/summary.md", "w", encoding="utf-8").write("\n".join(summary))
+
+              print(f"Wrote {csv_path}")
+              print(f"Wrote {pdf_path}")
+              print("Wrote reports/summary.md")
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+          python sarif_to_pdf.py
+          cat reports/summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload report artifact (PDF + CSV + charts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: reports
