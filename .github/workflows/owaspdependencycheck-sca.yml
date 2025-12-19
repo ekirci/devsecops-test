@@ -28,6 +28,7 @@ jobs:
                 args: >
                     --enableExperimental
                     --failOnCVSS 7
+                    --log reports/depcheck.log
             
             - name: Upload SARIF to GitHub Code Scanning
               uses: github/codeql-action/upload-sarif@v3
@@ -52,3 +53,9 @@ jobs:
                 name: sca-scanning-report
                 path: reports
               
+            - name: Upload depcheck log
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                name: depcheck-log
+                path: reports/depcheck.log
