@@ -7,6 +7,7 @@ on:
         branches: [ main ]
     push:
         branches: [ main ]
+    workflow_dispatch:
 
 permissions:
     contents: read
@@ -34,8 +35,8 @@ pip_audit:
     steps:
         - uses: actions/checkout@v4
         - uses: actions/setup-python@v5
-            with:
+          with:
                python-version: '3.11'
         - uses: pypa/gh-action-pip-audit@v1
-            with:
+          with:
                inputs: requirements.txt
