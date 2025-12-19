@@ -8,11 +8,12 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   sast-snyk:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     permissions:
       contents: read
@@ -37,3 +38,149 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk.sarif
+
+      - name: Upload Snyk SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-sast-sarif
+          path: snyk.sarif
+
+      - name: Generate PDF/CSV report from SARIF
+        if: always()
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas matplotlib reportlab
+
+          cat > sarif_to_pdf.py <<'PY'
+          import json, os
+          import pandas as pd
+          import matplotlib.pyplot as plt
+          from datetime import datetime
+          from reportlab.lib.pagesizes import A4
+          from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+          from reportlab.lib import colors
+          from reportlab.lib.styles import getSampleStyleSheet
+
+          def _get(obj, path, default=""):
+              cur = obj
+              for p in path:
+                  if isinstance(cur, dict) and p in cur:
+                      cur = cur[p]
+                  else:
+                      return default
+              return cur
+
+          def parse_sarif(path):
+              data = json.load(open(path, "r", encoding="utf-8"))
+              runs = data.get("runs") or []
+              run = runs[0] if runs else {}
+              tool = _get(run, ["tool", "driver", "name"], "snyk")
+              results = run.get("results") or []
+
+              rows = []
+              for r in results:
+                  loc0 = (r.get("locations") or [{}])[0]
+                  ploc = loc0.get("physicalLocation") or {}
+                  uri = _get(ploc, ["artifactLocation", "uri"], "")
+                  line = _get(ploc, ["region", "startLine"], "")
+                  msg = _get(r, ["message", "text"], "").replace("\n", " ").strip()
+
+                  rows.append({
+                      "tool": tool,
+                      "ruleId": r.get("ruleId", ""),
+                      "level": r.get("level", ""),
+                      "file": uri,
+                      "line": line,
+                      "message": msg
+                  })
+
+              return pd.DataFrame(rows)
+
+          def make_chart(df, out_png):
+              if df.empty:
+                  return None
+              plt.figure()
+              df["level"].fillna("unknown").value_counts().plot(kind="bar")
+              plt.title("Snyk SAST findings by level")
+              plt.xlabel("Level")
+              plt.ylabel("Count")
+              plt.tight_layout()
+              plt.savefig(out_png, dpi=200)
+              plt.close()
+              return out_png
+
+          def build_pdf(df, pdf_path, chart_path=None):
+              styles = getSampleStyleSheet()
+              doc = SimpleDocTemplate(pdf_path, pagesize=A4, title="Snyk SAST Report")
+              story = []
+
+              story.append(Paragraph("Snyk SAST Report", styles["Title"]))
+              story.append(Spacer(1, 8))
+              story.append(Paragraph(f"Generated: {datetime.utcnow().isoformat()}Z", styles["Normal"]))
+              story.append(Spacer(1, 12))
+              story.append(Paragraph(f"Total findings: <b>{len(df)}</b>", styles["Normal"]))
+              story.append(Spacer(1, 10))
+
+              if chart_path and os.path.exists(chart_path):
+                  story.append(Image(chart_path, width=520, height=280))
+                  story.append(Spacer(1, 12))
+
+              if df.empty:
+                  story.append(Paragraph("No findings in SARIF output.", styles["Normal"]))
+                  doc.build(story)
+                  return
+
+              cols = ["ruleId", "level", "file", "line", "message"]
+              table_data = [cols]
+
+              for _, row in df[cols].head(80).iterrows():
+                  msg = str(row["message"])
+                  if len(msg) > 140:
+                      msg = msg[:137] + "..."
+                  fp = str(row["file"])
+                  if len(fp) > 70:
+                      fp = "..." + fp[-67:]
+                  table_data.append([row["ruleId"], row["level"], fp, row["line"], msg])
+
+              tbl = Table(table_data, repeatRows=1, colWidths=[95, 55, 210, 35, 160])
+              tbl.setStyle(TableStyle([
+                  ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                  ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                  ("FONTSIZE", (0, 0), (-1, -1), 7),
+                  ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                  ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
+              ]))
+
+              story.append(tbl)
+              story.append(Spacer(1, 10))
+              story.append(Paragraph("Note: table is truncated to first 80 rows for readability.", styles["Italic"]))
+
+              doc.build(story)
+
+          def main():
+              os.makedirs("reports", exist_ok=True)
+
+              # SARIF -> dataframe
+              df = parse_sarif("snyk.sarif")
+
+              # CSV
+              df.to_csv("reports/snyk-findings.csv", index=False)
+
+              # Chart + PDF
+              chart = make_chart(df, "reports/snyk-levels.png")
+              build_pdf(df, "reports/snyk-sast-report.pdf", chart_path=chart)
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+          python sarif_to_pdf.py
+          ls -lah reports
+
+      - name: Upload Snyk PDF/CSV report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-sast-report
+          path: reports
