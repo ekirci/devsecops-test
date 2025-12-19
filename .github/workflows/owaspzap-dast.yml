@@ -1,4 +1,6 @@
-#DAST-OWASP ZAP CI/CI Pipeline
+#DAST-OWASP ZAP CI/CD Pipeline
+
+name: DAST-OWASP ZAP CI/CD Pipeline
 
 on:
     push:
