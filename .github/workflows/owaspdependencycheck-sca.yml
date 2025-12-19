@@ -19,20 +19,8 @@ jobs:
 
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v4    
             - name: Dependency-Check (SARIF)
-              uses: dependency-check/Dependency-Check_Action@main
-              with:
-               project: 'devsecops-assessment'
-               path: '.'
-               format: 'SARIF'
-               out: 'reports'
-               args: >
-                    --enableExperimental
-                    --failOnCVSS 7
-            
-            - name: Dependency-Check (SARIF)
-              id: depcheck_sarif
               uses: dependency-check/Dependency-Check_Action@1.1.0
               with:
                 project: 'devsecops-test'
@@ -40,14 +28,15 @@ jobs:
                 format: 'SARIF'
                 out: 'reports'
                 args: >
+                    --enableExperimental
                     --failOnCVSS 7
             
             - name: Upload SARIF to GitHub Code Scanning
               uses: github/codeql-action/upload-sarif@v3
               with:
-                sarif_file: reports/dependency-check-report.sarif
+                sarif_file: reports/sca-scanning-report.sarif
 
-            - name: Dependency-Check (HTML report)
+            - name: Dependency-Check (HTML)
               uses: dependency-check/Dependency-Check_Action@1.1.0
               with:
                 project: 'devsecops-test'
@@ -55,6 +44,7 @@ jobs:
                 format: 'SARIF'
                 out: 'reports'
                 args: >
+                    --enableExperimental
                     --failOnCVSS 7
 
             - name: Upload HTML report artifact
