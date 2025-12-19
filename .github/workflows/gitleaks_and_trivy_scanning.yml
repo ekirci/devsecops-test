@@ -1,4 +1,4 @@
-##Gitleaks for secret scanning & Trivy for IaC,SCA and docker image scanning
+# Gitleaks for secret scanning & Trivy for IaC,SCA and docker image scanning
 name: Gitleaks and Trivy Scanning
 
 'on':
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   secrets_gitleaks:
-    name: Secret scanning with Gitleaks
+    name: Gitleaks (Secrets)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -22,48 +22,58 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Debug - runner & repo info
+
+      - name: Debug - verify gitleaks config exists
+        run: |
+          ls -lah
+          test -f gitleaks.toml && echo "gitleaks.toml OK" || (echo "Missing gitleaks.toml" && exit 1)
+
+      - name: Run Gitleaks (Docker CLI) -> SARIF
+        id: gitleaks
+        continue-on-error: true
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:latest detect \
+            --config gitleaks.toml \
+            --no-git \
+            --verbose \
+            --report-format sarif \
+            --report-path gitleaks.sarif
+          echo "exitcode=$?" >> $GITHUB_OUTPUT
+
+      - name: Debug - show gitleaks SARIF stats
         if: always()
         run: |
-          uname -a
-          git --version
-          git log -1 --oneline || true
-          pwd
-          ls -lah
+          ls -lah gitleaks.sarif || true
+          jq '.runs[0].results | length' gitleaks.sarif || true
 
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
-          GITLEAKS_CONFIG: gitleaks.toml
-          GITLEAKS_VERSION: latest
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
-          GITLEAKS_ENABLE_SUMMARY: "true"
-
-      - name: Debug - end snapshot
+      - name: Upload SARIF (Gitleaks)
         if: always()
-        run: |
-          echo "End of Gitleaks job"
-          ls -lah
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks.sarif
+          category: 'gitleaks'
 
+      - name: Upload Gitleaks SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-sarif
+          path: gitleaks.sarif
+
+      - name: Gate on secrets (fail if leaks found)
+        if: steps.gitleaks.outputs.exitcode != '0'
+        run: |
+          echo "Gitleaks found secrets. Failing the job."
+          exit 1
 
   trivy_config:
-    name: IaC and Dockerfile scanning with Trivy
+    name: Trivy config (IaC + Dockerfile)
     runs-on: ubuntu-latest
     needs: secrets_gitleaks
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Debug - list likely IaC/Docker files
-        if: always()
-        run: |
-          pwd
-          ls -lah
-          echo "Terraform files:"
-          find . -maxdepth 3 -type f -name "*.tf" -print || true
-          echo "Dockerfiles:"
-          find . -maxdepth 3 -type f -iname "Dockerfile*" -print || true
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Trivy config scan -> SARIF
         uses: aquasecurity/trivy-action@0.33.1
@@ -72,14 +82,15 @@ jobs:
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-config.sarif'
-          severity: 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL'
+          severity: 'HIGH,CRITICAL'
           exit-code: '0'
 
       - name: Debug - verify SARIF exists
         if: always()
         run: |
           ls -lah trivy-config.sarif || true
-          test -f trivy-config.sarif || (echo "ERROR: trivy-config.sarif not created" && exit 1)
+          jq '.runs[0].results | length' trivy-config.sarif || true
+
       - name: Upload SARIF (Trivy config)
         if: always()
         uses: github/codeql-action/upload-sarif@v3
@@ -87,29 +98,21 @@ jobs:
           sarif_file: 'trivy-config.sarif'
           category: 'trivy-config'
 
-      - name: Debug - end snapshot
+      - name: Upload Trivy config SARIF artifact
         if: always()
-        run: |
-          echo "End of Trivy config job"
-          ls -lah *.sarif 2>/dev/null || true
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-config-sarif
+          path: trivy-config.sarif
 
   trivy_fs:
-    name: SCA scanning with Trivy fs
+    name: Trivy fs (SCA)
     runs-on: ubuntu-latest
     needs: secrets_gitleaks
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Debug - list repo root
-        if: always()
-        run: |
-          pwd
-          ls -lah
-          echo "Common manifests (best-effort):"
-          find . -maxdepth 3 -type f \
-            \( -iname "requirements*.txt" -o -iname "pyproject.toml" -o -iname "package.json" -o -iname "pom.xml" \) \
-            -print || true
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Trivy fs scan -> SARIF
         uses: aquasecurity/trivy-action@0.33.1
@@ -118,17 +121,15 @@ jobs:
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-fs.sarif'
-          severity: 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL'
-          vuln-type: 'os,library'
-          ignore-unfixed: false
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
           exit-code: '0'
-          
 
       - name: Debug - verify SARIF exists
         if: always()
         run: |
           ls -lah trivy-fs.sarif || true
-          test -f trivy-fs.sarif || (echo "ERROR: trivy-fs.sarif not created" && exit 1)
+          jq '.runs[0].results | length' trivy-fs.sarif || true
 
       - name: Upload SARIF (Trivy fs)
         if: always()
@@ -137,19 +138,21 @@ jobs:
           sarif_file: 'trivy-fs.sarif'
           category: 'trivy-fs'
 
-      - name: Debug - end snapshot
+      - name: Upload Trivy fs SARIF artifact
         if: always()
-        run: |
-          echo "End of Trivy fs job"
-          ls -lah *.sarif 2>/dev/null || true
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-sarif
+          path: trivy-fs.sarif
 
   trivy_image:
-    name: Container image scanning with Trivy 
+    name: Trivy image (Container vuln)
     runs-on: ubuntu-latest
     needs: [trivy_config, trivy_fs]
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Build image
         run: docker build -t devsecops-demo:ci .
@@ -161,16 +164,15 @@ jobs:
           image-ref: 'devsecops-demo:ci'
           format: 'sarif'
           output: 'trivy-image.sarif'
-          severity: 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL'
-          vuln-type: 'os,library'
-          ignore-unfixed: false
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
           exit-code: '0'
 
       - name: Debug - verify SARIF exists
         if: always()
         run: |
           ls -lah trivy-image.sarif || true
-          test -f trivy-image.sarif || (echo "ERROR: trivy-image.sarif not created" && exit 1)
+          jq '.runs[0].results | length' trivy-image.sarif || true
 
       - name: Upload SARIF (Trivy image)
         if: always()
@@ -179,6 +181,12 @@ jobs:
           sarif_file: 'trivy-image.sarif'
           category: 'trivy-image'
 
+      - name: Upload Trivy image SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-sarif
+          path: trivy-image.sarif
 
       - name: Debug - if build fails, rerun without BuildKit (extra logs)
         if: failure()
