@@ -1,0 +1,18 @@
+title = "DevSecOps assessment rules"
+
+[extend]
+useDefault = true
+
+#finding hardcoded DATABASE_API_KEY in the code
+[[rules]]
+id = "hardcoded-database-api-key"
+description = "Detect hardcoded DATABASE_API_KEY assignments"
+regex = '''(?i)\bDATABASE_API_KEY\s*=\s*["'][^"'\n]{8,}["']'''
+keywords = ["DATABASE_API_KEY"]
+
+#force to catch demo token format
+[[rules]]
+id = "devsecops-demo-token"
+description = "Detect demo tokens like SECRET_DEVSECOPS_TOKEN_12345"
+regex = '''\bSECRET_DEVSECOPS_TOKEN_[0-9A-Z_]{3,}\b'''
+keywords = ["SECRET_DEVSECOPS_TOKEN"]
