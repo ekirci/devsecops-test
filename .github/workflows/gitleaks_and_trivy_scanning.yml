@@ -1,0 +1,113 @@
+##Gitleaks for secret scanning & Trivy for IaC,SCA and docker image scanning
+name: Gitleaks and Trivy Scanning
+
+'on':
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  secrets_gitleaks:
+    name: Secret scanning with Gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
+          GITLEAKS_ENABLE_SUMMARY: "true"
+
+
+  trivy_config:
+    name: IaC and Dockerfile scanning with Trivy
+    runs-on: ubuntu-latest
+    needs: secrets_gitleaks
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy config scan -> SARIF
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-config.sarif'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+
+      - name: Upload SARIF (Trivy config)
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-config.sarif'
+          category: 'trivy-config'
+
+  trivy_fs:
+    name: SCA scanning with Trivy fs
+    runs-on: ubuntu-latest
+    needs: secrets_gitleaks
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy fs scan -> SARIF
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs.sarif'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Upload SARIF (Trivy fs)
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-fs.sarif'
+          category: 'trivy-fs'
+
+  trivy_image:
+    name: Container image scanning with Trivy 
+    runs-on: ubuntu-latest
+    needs: [trivy_config, trivy_fs]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t devsecops-demo:ci .
+
+      - name: Trivy image scan -> SARIF
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: 'image'
+          image-ref: 'devsecops-demo:ci'
+          format: 'sarif'
+          output: 'trivy-image.sarif'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Upload SARIF (Trivy image)
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-image.sarif'
+          category: 'trivy-image'
+
