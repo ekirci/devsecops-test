@@ -22,6 +22,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Debug - runner & repo info
+        if: always()
+        run: |
+          uname -a
+          git --version
+          git log -1 --oneline || true
+          pwd
+          ls -lah
 
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
@@ -29,6 +37,12 @@ jobs:
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
           GITLEAKS_ENABLE_SUMMARY: "true"
+
+      - name: Debug - end snapshot
+        if: always()
+        run: |
+          echo "End of Gitleaks job"
+          ls -lah
 
 
   trivy_config:
@@ -38,6 +52,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
+      - name: Debug - list likely IaC/Docker files
+        if: always()
+        run: |
+          pwd
+          ls -lah
+          echo "Terraform files:"
+          find . -maxdepth 3 -type f -name "*.tf" -print || true
+          echo "Dockerfiles:"
+          find . -maxdepth 3 -type f -iname "Dockerfile*" -print || true
 
       - name: Trivy config scan -> SARIF
         uses: aquasecurity/trivy-action@0.33.1
@@ -49,12 +73,23 @@ jobs:
           severity: 'HIGH,CRITICAL'
           exit-code: '0'
 
+      - name: Debug - verify SARIF exists
+        if: always()
+        run: |
+          ls -lah trivy-config.sarif || true
+          test -f trivy-config.sarif || (echo "ERROR: trivy-config.sarif not created" && exit 1)
       - name: Upload SARIF (Trivy config)
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-config.sarif'
           category: 'trivy-config'
+
+      - name: Debug - end snapshot
+        if: always()
+        run: |
+          echo "End of Trivy config job"
+          ls -lah *.sarif 2>/dev/null || true
 
   trivy_fs:
     name: SCA scanning with Trivy fs
@@ -63,6 +98,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
+      - name: Debug - list repo root
+        if: always()
+        run: |
+          pwd
+          ls -lah
+          echo "Common manifests (best-effort):"
+          find . -maxdepth 3 -type f \
+            \( -iname "requirements*.txt" -o -iname "pyproject.toml" -o -iname "package.json" -o -iname "pom.xml" \) \
+            -print || true
 
       - name: Trivy fs scan -> SARIF
         uses: aquasecurity/trivy-action@0.33.1
@@ -75,12 +120,24 @@ jobs:
           ignore-unfixed: true
           exit-code: '0'
 
+      - name: Debug - verify SARIF exists
+        if: always()
+        run: |
+          ls -lah trivy-fs.sarif || true
+          test -f trivy-fs.sarif || (echo "ERROR: trivy-fs.sarif not created" && exit 1)
+
       - name: Upload SARIF (Trivy fs)
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-fs.sarif'
           category: 'trivy-fs'
+
+      - name: Debug - end snapshot
+        if: always()
+        run: |
+          echo "End of Trivy fs job"
+          ls -lah *.sarif 2>/dev/null || true
 
   trivy_image:
     name: Container image scanning with Trivy 
@@ -104,6 +161,12 @@ jobs:
           ignore-unfixed: true
           exit-code: '0'
 
+      - name: Debug - verify SARIF exists
+        if: always()
+        run: |
+          ls -lah trivy-image.sarif || true
+          test -f trivy-image.sarif || (echo "ERROR: trivy-image.sarif not created" && exit 1)
+
       - name: Upload SARIF (Trivy image)
         if: always()
         uses: github/codeql-action/upload-sarif@v3
@@ -111,3 +174,15 @@ jobs:
           sarif_file: 'trivy-image.sarif'
           category: 'trivy-image'
 
+
+      - name: Debug - if build fails, rerun without BuildKit (extra logs)
+        if: failure()
+        run: |
+          echo "Build failed, trying again with BuildKit disabled for verbose logs..."
+          DOCKER_BUILDKIT=0 docker build -t devsecops-demo:ci . || true
+
+      - name: Debug - end snapshot
+        if: always()
+        run: |
+          echo "End of Trivy image job"
+          ls -lah *.sarif 2>/dev/null || true
