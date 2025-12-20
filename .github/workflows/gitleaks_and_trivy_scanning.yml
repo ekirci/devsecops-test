@@ -1,13 +1,11 @@
 # Gitleaks for secret scanning & Trivy for IaC,SCA and docker image scanning
 name: Gitleaks and Trivy Scanning
 
-'on':
+on:
   pull_request:
     branches: [ main ]
   push:
     branches: [ main ]
-    paths-ignore:
-      - ".github/workflows/**"
   workflow_dispatch:
 
 permissions:
